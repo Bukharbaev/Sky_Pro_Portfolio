@@ -1,0 +1,106 @@
+with first_payments as
+    (
+    select user_id
+        , min(transaction_datetime)::date first_payment_date
+    from skyeng_db.payments
+    where status_name = 'success'
+    group by user_id
+    )
+    ,
+    
+    all_dates as
+    (
+    select distinct class_start_datetime::date dt
+    from skyeng_db.classes
+    where class_start_datetime between '2016-01-01' and '2017-01-01'
+    )
+    , 
+    
+    payments_by_dates as
+    (
+    select user_id
+        , transaction_datetime::date as payment_date
+        , sum(classes) as transaction_balance_change
+    from skyeng_db.payments
+    where status_name = 'success'
+    group by user_id
+        , payment_date
+    order by user_id
+        , payment_date
+    )
+    
+    , all_dates_by_user as
+    (
+    select fp.user_id user_id
+        , ad.dt dt
+    from first_payments fp
+        left join all_dates ad 
+            on ad.dt >= fp.first_payment_date
+    group by fp.user_id
+        ,dt
+    )
+    
+    , classes_by_dates as
+    (
+    select user_id
+        ,class_start_datetime::date class_date
+        , count(id_class) * -1 classes
+    from skyeng_db.classes
+    where class_start_datetime between '2016-01-01' and '2017-01-01'
+        and class_status in ('success', 'failed_by_student')
+        and class_type != 'trial'
+    group by user_id
+        ,class_date
+    order by user_id
+    )
+
+    , payments_by_dates_cumsum as
+    (
+    select adbu.user_id
+        , dt
+        , coalesce(transaction_balance_change, 0) transaction_balance_change
+        , sum(coalesce(transaction_balance_change, 0)) over (partition by adbu.user_id order by dt) transaction_balance_change_cs
+    from all_dates_by_user adbu
+        left join payments_by_dates pbd 
+            on adbu.user_id = pbd.user_id 
+                and adbu.dt = pbd.payment_date
+    )
+    
+
+    , classes_by_dates_dates_cumsum as
+    (
+    select adbu.user_id
+        , dt
+        , coalesce(classes, 0) classes
+        , sum(coalesce(classes, 0)) over (partition by adbu.user_id order by dt) classes_cs
+    from all_dates_by_user adbu
+        left join classes_by_dates cbd 
+            on adbu.user_id = cbd.user_id 
+                and adbu.dt = cbd.class_date
+    )
+    
+    , balances as
+    (
+    select pbdc.user_id
+        , pbdc.dt
+        , transaction_balance_change
+        , transaction_balance_change_cs
+        , classes
+        , classes_cs
+        , classes_cs + transaction_balance_change_cs as balance
+    from payments_by_dates_cumsum pbdc
+        join classes_by_dates_dates_cumsum cbddc 
+            on pbdc.user_id = cbddc.user_id 
+                and pbdc.dt = cbddc.dt
+    )
+
+select dt
+    , sum(transaction_balance_change) sum_trsn_blnce_chnge
+    , sum(transaction_balance_change_cs) sum_trsn_blnce_chnge_cs
+    , sum(classes) sum_classes
+    , sum(classes_cs) sum_classes_cs
+    , sum(balance) sum_balance
+from balances
+group by dt
+order by dt
+limit 1000
